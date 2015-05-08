@@ -1,0 +1,8 @@
+PKG bb2
+S src
+B _build/src
+B _build/tests
+PKG core
+PKG bittrex.async
+PKG ocamlgraph
+
