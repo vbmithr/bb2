@@ -3,12 +3,7 @@ true: debug, bin_annot, safe_string
 <src>: include
 
 <src/*.*>: package(core), \
+           package(async), \
            package(ocamlgraph), \
            package(bittrex.async), \
-           package(ppx_deriving.std), \
-           package(ppx_deriving_yojson), \
-	   package(cohttp.async), \
-           thread, \
-	   package(nocrypto), \
-	   package(cstruct), \
-           package(hex)
+           thread
