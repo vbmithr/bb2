@@ -112,6 +112,61 @@ let cryptsy () =
   Writer.save "cryptsy.dot" ~contents >>| fun () ->
   Format.printf "Done processing.@."
 
+type exchange = [`BFX | `BTCE | `BTRex | `Poloniex | `Kraken | `Hitbtc] [@@deriving show]
+
+module Order = struct
+  type t = {
+  p: float;
+  q: float;
+  x: exchange;
+  } [@@deriving show,create]
+end
+
+module AskSet = struct
+  module AskSet = CCHeap.Make(
+    struct
+      open Order
+      type t = Order.t
+      let leq t t' = Float.compare t.p t'.p < 0
+    end
+    )
+  include AskSet
+
+  let price_and_nb_below t threshold =
+    let open Order in
+    fold (fun (nb, a) {p; q; _} ->
+        if p < threshold
+        then succ nb, a +. p *. q else nb, a)
+      (0, 0.) t
+end
+
+module BidSet = struct
+  module BidSet = CCHeap.Make(
+    struct
+      open Order
+      type t = Order.t
+      let leq t t' = Float.compare t.p t'.p > 0
+    end
+    )
+  include BidSet
+
+  let price_and_nb_above t threshold =
+    let open Order in
+    fold (fun (nb, a) {p; q; _} ->
+        if p > threshold
+        then succ nb, a +. p *. q else nb, a)
+      (0, 0.) t
+end
+
+let fees = [
+  `BFX, 0.001;
+  `BTCE, 0.002;
+  `BTRex, 0.0025;
+  `Poloniex, 0.002;
+  `Kraken, 0.001;
+  `Hitbtc, 0.001;
+]
+
 let depth () =
   let module BFX = Bittrex.Bitfinex(Bittrex_async.Bitfinex) in
   let module BTCE = Bittrex.BTCE(Bittrex_async.BTCE) in
@@ -120,40 +175,76 @@ let depth () =
   let module Kraken = Bittrex.Kraken(Bittrex_async.Kraken) in
   let module Hitbtc = Bittrex.Hitbtc(Bittrex_async.Hitbtc) in
 
-  let books_ltcbtc = String.Table.create () in
-  let books_dogebtc = String.Table.create () in
+  let log = Log.create ~level:`Info ~output:[(Log.Output.stderr ())] in
 
-  let rec update_books ival =
+  let rec loop ival =
+    let open Bittrex.OrderBook in
+    let ltcbid = ref BidSet.empty in
+    let ltcask = ref AskSet.empty in
+
     Monitor.try_with
       (fun () -> Deferred.all_unit
-          [ (BFX.OrderBook.book `LTC `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"BFX" ~data);
-            (BTCE.OrderBook.book `LTC `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"BTCE" ~data);
-            (BTrex.OrderBook.book `LTC `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"BTrex" ~data);
-            (Poloniex.OrderBook.book `LTC `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"Poloniex" ~data);
-            (Kraken.OrderBook.book `BTC `LTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"Kraken" ~data);
-            (Hitbtc.OrderBook.book `LTC `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"Hitbtc" ~data);
-            (BTrex.OrderBook.book `DOGE `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"BTrex" ~data);
-            (Poloniex.OrderBook.book `DOGE `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"Poloniex" ~data);
-            (Kraken.OrderBook.book `BTC `DOGE >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"Kraken" ~data);
-            (Hitbtc.OrderBook.book `DOGE `BTC >>| fun data ->
-            String.Table.replace books_ltcbtc ~key:"Hitbtc" ~data);
+          [
+            (BFX.OrderBook.book `LTC `BTC >>| fun { bids; asks } ->
+             let fee = List.Assoc.find_exn fees `BFX in
+             ltcbid := List.fold_left ~init:!ltcbid ~f:(fun a { price; qty } ->
+                 BidSet.add a @@ Order.create ~p:(price *. (1. -. fee)) ~q:qty ~x:`BFX ()
+               ) bids;
+             ltcask := List.fold_left ~init:!ltcask ~f:(fun a { price; qty } ->
+                 AskSet.add a @@ Order.create ~p:(price *. (1. +. fee)) ~q:qty ~x:`BFX ()
+               ) asks;);
+
+            (BTCE.OrderBook.book `LTC `BTC >>| fun { bids; asks } ->
+             let fee = List.Assoc.find_exn fees `BTCE in
+             ltcbid := List.fold_left ~init:!ltcbid ~f:(fun a { price; qty } ->
+                 BidSet.add a @@ Order.create ~p:(price *. (1. -. fee)) ~q:qty ~x:`BTCE ()
+               ) bids;
+             ltcask := List.fold_left ~init:!ltcask ~f:(fun a { price; qty } ->
+                 AskSet.add a @@ Order.create ~p:(price *. (1. +. fee)) ~q:qty ~x:`BTCE ()
+               ) asks;);
+
+            (BTrex.OrderBook.book `LTC `BTC >>| fun { bids; asks } ->
+             let fee = List.Assoc.find_exn fees `BTRex in
+             ltcbid := List.fold_left ~init:!ltcbid ~f:(fun a { price; qty } ->
+                 BidSet.add a @@ Order.create ~p:(price *. (1. -. fee)) ~q:qty ~x:`BTRex ()
+               ) bids;
+             ltcask := List.fold_left ~init:!ltcask ~f:(fun a { price; qty } ->
+                 AskSet.add a @@ Order.create ~p:(price *. (1. +. fee)) ~q:qty ~x:`BTRex ()
+               ) asks;);
+
+            (Poloniex.OrderBook.book `LTC `BTC >>| fun { bids; asks } ->
+             let fee = List.Assoc.find_exn fees `Poloniex in
+             ltcbid := List.fold_left ~init:!ltcbid ~f:(fun a { price; qty } ->
+                 BidSet.add a @@ Order.create ~p:(price *. (1. +. fee)) ~q:qty ~x:`Poloniex ()
+               ) bids;
+             ltcask := List.fold_left ~init:!ltcask ~f:(fun a { price; qty } ->
+                 AskSet.add a @@ Order.create ~p:(price *. (1. +. fee)) ~q:qty ~x:`Poloniex ()
+               ) asks;);
+
+            (Hitbtc.OrderBook.book `LTC `BTC >>| fun { bids; asks } ->
+             let fee = List.Assoc.find_exn fees `Hitbtc in
+             ltcbid := List.fold_left ~init:!ltcbid ~f:(fun a { price; qty } ->
+                 BidSet.add a @@ Order.create ~p:(price *. (1. +. fee)) ~q:qty ~x:`Hitbtc ()
+               ) bids;
+             ltcask := List.fold_left ~init:!ltcask ~f:(fun a { price; qty } ->
+                 AskSet.add a @@ Order.create ~p:(price *. (1. +. fee)) ~q:qty ~x:`Hitbtc ()
+               ) asks;);
           ]) >>= function
     | Ok () ->
+      Log.info log "Updated all books succesfully.";
+      (* let maxbid = BidSet.find_min_exn !ltcbid in *)
+      (* let minask = AskSet.find_min_exn !ltcask in *)
+      (* if minask < maxbid then (\* profit! *\) *)
+      (*   let pr, nb = AskSet.price_and_nb_below minask maxbid in *)
+
       after @@ Time.Span.of_string (string_of_int ival ^ "s") >>= fun () ->
-      update_books ival
+      loop ival
     | Error exn ->
+      Log.info log "Error updating books: %s" (Exn.to_string exn);
       after @@ Time.Span.of_string (string_of_int ival ^ "s") >>= fun () ->
-      update_books ival
+      loop ival
   in
+  don't_wait_for @@ loop 2;
   Deferred.unit
 
 let btcltc () =
@@ -169,16 +260,9 @@ let btcltc () =
   G.add_vertex g "ltc";
   G.add_vertex g "doge";
 
-  let fees = [
-    "BFX", 0.001;
-    "BTCE", 0.002;
-    "BTrex", 0.0025;
-    "Poloniex", 0.002;
-    "Kraken", 0.001;
-  ] in
 
   BFX.Ticker.(ticker `LTC `BTC >>| fun { bid; ask; } ->
-              let fee = List.Assoc.find_exn fees "BFX" in
+              let fee = List.Assoc.find_exn fees `BFX in
               let bid = bid *. (1. -. fee) in
               let ask = ask *. (1. +. fee) in
               Format.printf "BFX LTCBTC %g %g@." bid ask;
@@ -187,7 +271,7 @@ let btcltc () =
              ) >>= fun () ->
 
   BTCE.Ticker.(ticker `LTC `BTC >>| fun { sell; buy; } ->
-               let fee = List.Assoc.find_exn fees "BTCE" in
+               let fee = List.Assoc.find_exn fees `BTCE in
                let sell = sell *. (1. -. fee) in
                let buy = buy *. (1. +. fee) in
                Format.printf "BTCE LTCBTC %g %g@." sell buy;
@@ -196,7 +280,7 @@ let btcltc () =
               ) >>= fun () ->
 
   BTrex.Ticker.(ticker `LTC `BTC >>| fun { bid; ask; } ->
-                let fee = List.Assoc.find_exn fees "BTrex" in
+                let fee = List.Assoc.find_exn fees `BTRex in
                 let bid = bid *. (1. -. fee) in
                 let ask = ask *. (1. +. fee) in
                 Format.printf "BTrex LTCBTC %g %g@." bid ask;
@@ -205,7 +289,7 @@ let btcltc () =
                ) >>= fun () ->
 
   Poloniex.Ticker.(ticker `LTC `BTC >>| fun { bid; ask; } ->
-                   let fee = List.Assoc.find_exn fees "Poloniex" in
+                   let fee = List.Assoc.find_exn fees `Poloniex in
                    let bid = bid *. (1. -. fee) in
                    let ask = ask *. (1. +. fee) in
                    Format.printf "Poloniex LTCBTC %g %g@." bid ask;
@@ -214,7 +298,7 @@ let btcltc () =
                   ) >>= fun () ->
 
   Kraken.Ticker.(ticker `BTC `LTC >>| fun { bid; ask; } ->
-                 let fee = List.Assoc.find_exn fees "Kraken" in
+                 let fee = List.Assoc.find_exn fees `Kraken in
                  let bid = bid *. (1. -. fee) in
                  let ask = ask *. (1. +. fee) in
                  Format.printf "Kraken LTCBTC %g %g@." (1. /. ask) (1. /. bid);
@@ -223,7 +307,7 @@ let btcltc () =
                 ) >>= fun () ->
 
   BTrex.Ticker.(ticker `DOGE `BTC >>| fun { bid; ask; } ->
-                let fee = List.Assoc.find_exn fees "BTrex" in
+                let fee = List.Assoc.find_exn fees `BTRex in
                 let bid = bid *. (1. -. fee) in
                 let ask = ask *. (1. +. fee) in
                 Format.printf "BTrex DOGEBTC %g %g@." bid ask;
@@ -232,7 +316,7 @@ let btcltc () =
                ) >>= fun () ->
 
   Poloniex.Ticker.(ticker `DOGE `BTC >>| fun { bid; ask; } ->
-                   let fee = List.Assoc.find_exn fees "Poloniex" in
+                   let fee = List.Assoc.find_exn fees `Poloniex in
                    let bid = bid *. (1. -. fee) in
                    let ask = ask *. (1. +. fee) in
                    Format.printf "Poloniex DOGEBTC %g %g@." bid ask;
@@ -241,7 +325,7 @@ let btcltc () =
                   ) >>= fun () ->
 
   Kraken.Ticker.(ticker `BTC `DOGE >>| fun { bid; ask; } ->
-                 let fee = List.Assoc.find_exn fees "Kraken" in
+                 let fee = List.Assoc.find_exn fees `Kraken in
                  let bid = bid *. (1. -. fee) in
                  let ask = ask *. (1. +. fee) in
                  Format.printf "Kraken DOGEBTC %g %g@." (1. /. ask) (1. /. bid);

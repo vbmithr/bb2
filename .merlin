@@ -5,4 +5,5 @@ B _build/tests
 PKG core
 PKG bittrex.async
 PKG ocamlgraph
-
+PKG containers
+PKG ppx_deriving.std
