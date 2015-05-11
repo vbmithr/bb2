@@ -112,13 +112,58 @@ let cryptsy () =
   Writer.save "cryptsy.dot" ~contents >>| fun () ->
   Format.printf "Done processing.@."
 
+let depth () =
+  let module BFX = Bittrex.Bitfinex(Bittrex_async.Bitfinex) in
+  let module BTCE = Bittrex.BTCE(Bittrex_async.BTCE) in
+  let module BTrex = Bittrex.Bittrex(Bittrex_async.Bittrex) in
+  let module Poloniex = Bittrex.Poloniex(Bittrex_async.Poloniex) in
+  let module Kraken = Bittrex.Kraken(Bittrex_async.Kraken) in
+  let module Hitbtc = Bittrex.Hitbtc(Bittrex_async.Hitbtc) in
+
+  let books_ltcbtc = String.Table.create () in
+  let books_dogebtc = String.Table.create () in
+
+  let rec update_books ival =
+    Monitor.try_with
+      (fun () -> Deferred.all_unit
+          [ (BFX.OrderBook.book `LTC `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"BFX" ~data);
+            (BTCE.OrderBook.book `LTC `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"BTCE" ~data);
+            (BTrex.OrderBook.book `LTC `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"BTrex" ~data);
+            (Poloniex.OrderBook.book `LTC `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"Poloniex" ~data);
+            (Kraken.OrderBook.book `BTC `LTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"Kraken" ~data);
+            (Hitbtc.OrderBook.book `LTC `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"Hitbtc" ~data);
+            (BTrex.OrderBook.book `DOGE `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"BTrex" ~data);
+            (Poloniex.OrderBook.book `DOGE `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"Poloniex" ~data);
+            (Kraken.OrderBook.book `BTC `DOGE >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"Kraken" ~data);
+            (Hitbtc.OrderBook.book `DOGE `BTC >>| fun data ->
+            String.Table.replace books_ltcbtc ~key:"Hitbtc" ~data);
+          ]) >>= function
+    | Ok () ->
+      after @@ Time.Span.of_string (string_of_int ival ^ "s") >>= fun () ->
+      update_books ival
+    | Error exn ->
+      after @@ Time.Span.of_string (string_of_int ival ^ "s") >>= fun () ->
+      update_books ival
+  in
+  Deferred.unit
+
 let btcltc () =
   let module BFX = Bittrex.Bitfinex(Bittrex_async.Bitfinex) in
   let module BTCE = Bittrex.BTCE(Bittrex_async.BTCE) in
   let module BTrex = Bittrex.Bittrex(Bittrex_async.Bittrex) in
-  let module Cryptsy = Bittrex.Cryptsy(Bittrex_async.Cryptsy) in
   let module Poloniex = Bittrex.Poloniex(Bittrex_async.Poloniex) in
   let module Kraken = Bittrex.Kraken(Bittrex_async.Kraken) in
+  let module Hitbtc = Bittrex.Hitbtc(Bittrex_async.Hitbtc) in
+
   let g = G.create () in
   G.add_vertex g "btc";
   G.add_vertex g "ltc";
@@ -213,7 +258,8 @@ let btcltc () =
         String.concat ~sep:" -> "
           (List.map cycle ~f:(fun (start,(v,id),stop) ->
                Format.sprintf "%s %g %d %s" start v id stop))
-    )
+    );
+  Shutdown.shutdown 0
 
 let _ =
   don't_wait_for @@ btcltc ();
